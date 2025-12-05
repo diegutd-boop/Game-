@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Demon Lady Dash — Mini Runner</title>
+<style>
+  :root{
+    --bg:#0b0f1a;
+    --ground:#1e2a3a;
+    --accent:#ff6b6b;
+    --accent2:#7bf1a8;
+    --text:#dce7ff;
+  }
+  html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg) 0%, #071024 60%);color:var(--text);font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial;}
+  #gameWrap{max-width:900px;margin:18px auto;padding:10px;}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  h1{font-size:18px;margin:0;color:var(--accent)}
+  .hud{display:flex;gap:12px;align-items:center}
+  .btn{background:transparent;border:1px solid rgba(255,255,255,0.08);padding:6px 10px;border-radius:8px;color:var(--text);cursor:pointer}
+  .btn:active{transform:translateY(1px)}
+  #canvas{width:100%;height:520px;background:
+    radial-gradient(ellipse at 10% 20%, rgba(255,107,107,0.06) 0%, transparent 10%),
+    linear-gradient(180deg, rgba(255,255,255,0.02), transparent),
+    transparent;display:block;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.7);overflow:hidden}
+  footer{margin-top:8px;font-size:13px;color:rgba(220,231,255,0.65)}
+  .controls{font-size:13px;color:rgba(220,231,255,0.7)}
+  .big{font-weight:700;color:var(--accent2)}
+  .center{display:flex;align-items:center;justify-content:center;height:100%}
+  #overlay{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  #uiBox{background:linear-gradient(180deg,rgba(10,16,28,0.6),rgba(6,10,18,0.7));padding:18px;border-radius:12px;border:1px solid rgba(255,255,255,0.04);backdrop-filter:blur(6px);}
+  small{color:rgba(220,231,255,0.6)}
+  @media (max-width:600px){
+    #canvas{height:420px}
+  }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <header>
+    <h1>Demon Lady Dash — Mini Runner</h1>
+    <div class="hud">
+      <div class="controls"><small>Jump: <span class="big">↑ / Space</span> &nbsp; Dash: <span class="big">D / Tap</span></small></div>
+      <button id="muteBtn" class="btn">🔊</button>
+      <button id="restartBtn" class="btn">Restart</button>
+    </div>
+  </header>
+
+  <div style="position:relative">
+    <canvas id="canvas" width="1200" height="520"></canvas>
+    <div id="overlay" style="pointer-events:none">
+      <div id="uiBox" style="display:none;pointer-events:auto;text-align:center">
+        <div id="msgTitle" style="font-size:20px;margin-bottom:8px;color:var(--accent)">Game Over</div>
+        <div id="msgText" style="margin-bottom:12px">Score: <span id="finalScore">0</span></div>
+        <button id="playBtn" class="btn">Play Again</button>
+        <div style="margin-top:8px;font-size:12px;color:rgba(220,231,255,0.7)">Tip: hold <strong>D</strong> to dash forward through small obstacles.</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Small demo. Works on desktop & mobile. Host on GitHub Pages / Netlify by uploading this file.
+  </footer>
+</div>
+
+<script>
+/*
+  Demon Lady Dash - Mini Runner
+  Single-file HTML + JS canvas game.
+  Controls: Space / Up = jump, D / Tap = dash
+  Mobile: tap to dash, swipe up or double-tap to jump.
+*/
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W = canvas.width;
+let H = canvas.height;
+
+function resizeCanvasForDisplay(){
+  // Keep internal resolution but scale CSS for crispness
+  const rect = canvas.getBoundingClientRect();
+  const cssW = Math.floor(rect.width);
+  const cssH = Math.floor(rect.height);
+  canvas.width = Math.max(800, cssW * 2);
+  canvas.height = Math.max(480, cssH * 2);
+  W = canvas.width; H = canvas.height;
+  ctx.imageSmoothingEnabled = false;
+}
+resizeCanvasForDisplay();
+window.addEventListener('resize', () => {
+  resizeCanvasForDisplay();
+});
+
+// Game variables
+let running = false;
+let gameOver = true;
+let score = 0;
+let speed = 6; // world speed
+let gravity = 0.9 * (canvas.width/1200);
+const groundHeight = Math.round(H * 0.16);
+let obstacles = [];
+let pickups = [];
+let frames = 0;
+let mute = false;
+
+// Player
+const player = {
+  x: Math.round(W*0.12),
+  y: 0,
+  w: Math.round(W*0.07),
+  h: Math.round(H*0.14),
+  vy: 0,
+  onGround: false,
+  jumps: 0,
+  dashTimer: 0,
+  dashCooldown: 0
+};
+
+// Simple palette
+const P = {
+  bg: '#071024',
+  ground: '#122235',
+  demon: '#ff6b6b',
+  trail: '#ffadc0',
+  obstacle: '#354e66',
+  coin: '#ffd76b',
+  text: '#dce7ff'
+};
+
+// Sounds (tiny beep via WebAudio)
+const AudioCtx = window.AudioContext ? new AudioContext() : null;
+function beep(freq=220, len=0.06, type='sine', vol=0.07){
+  if(mute || !AudioCtx) return;
+  const s = AudioCtx.createOscillator();
+  const g = AudioCtx.createGain();
+  s.type = type;
+  s.frequency.value = freq;
+  g.gain.value = vol;
+  s.connect(g); g.connect(AudioCtx.destination);
+  s.start();
+  g.gain.exponentialRampToValueAtTime(0.0001, AudioCtx.currentTime + len);
+  s.stop(AudioCtx.currentTime + len + 0.02);
+}
+
+// Controls
+let keys = {};
+window.addEventListener('keydown', e => {
+  if(e.repeat) return;
+  keys[e.key.toLowerCase()] = true;
+  handleKey(e.key.toLowerCase(), true);
+});
+window.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+  handleKey(e.key.toLowerCase(), false);
+});
+function handleKey(k, down){
+  if(k === ' ' || k === 'arrowup' || k === 'w') {
+    if(down) tryJump();
+  } else if(k === 'd') {
+    if(down) startDash();
+    else stopDash();
+  } else if(k === 'r') restart();
+}
+
+// Touch / mobile: tap to dash, swipe up for jump
+let touchStartY = null;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if(!running) startGame();
+  touchStartY = e.touches[0].clientY;
+  // small tap => dash
+  startDash();
+});
+canvas.addEventListener('touchend', e => {
+  touchStartY = null;
+  stopDash();
+});
+canvas.addEventListener('touchmove', e => {
+  const y = e.touches[0].clientY;
+  if(touchStartY !== null && (touchStartY - y) > 20) {
+    tryJump();
+    touchStartY = null;
+  }
+});
+
+// Mouse: click to dash
+canvas.addEventListener('mousedown', e => {
+  startDash();
+});
+canvas.addEventListener('mouseup', e => {
+  stopDash();
+});
+
+// UI buttons
+const playBtn = document.getElementById('playBtn');
+const overlayBox = document.getElementById('uiBox');
+document.getElementById('restartBtn').addEventListener('click', restart);
+document.getElementById('muteBtn').addEventListener('click', () => {
+  mute = !mute;
+  document.getElementById('muteBtn').textContent = mute ? '🔇' : '🔊';
+});
+playBtn.addEventListener('click', restart);
+
+// Game actions
+function tryJump(){
+  if(!running) startGame();
+  // allow double jump (2)
+  if(player.onGround || player.jumps < 2) {
+    player.vy = -18 * (canvas.width/1200);
+    player.onGround = false;
+    player.jumps += 1;
+    beep(520,0.05,'triangle',0.06);
+  }
+}
+
+function startDash(){
+  if(player.dashCooldown > 0) return;
+  player.dashTimer = 18; // frames of dash
+  player.dashCooldown = 80; // cooldown frames
+  beep(700,0.04,'sine',0.06);
+}
+
+function stopDash(){
+  // optional — we let dash run full
+}
+
+// Utility: spawn obstacles
+function spawnObstacle(){
+  const h = randInt(Math.floor(H*0.08), Math.floor(H*0.28));
+  const type = Math.random() < 0.25 ? 'tall' : 'low';
+  const y = H - groundHeight - (type==='tall' ? h : Math.floor(h*0.45));
+  obstacles.push({
+    x: W + 40,
+    y,
+    w: Math.floor(W*0.06),
+    h,
+    passed: false,
+    type
+  });
+}
+
+// spawn coin/pickup
+function spawnPickup(){
+  const y = H - groundHeight - Math.floor(H*0.22) - Math.random()*Math.floor(H*0.18);
+  pickups.push({
+    x: W + 60,
+    y,
+    r: Math.round(14 * (canvas.width/1200))
+  });
+}
+
+function randInt(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
+
+// Reset/start/restart
+function resetGame(){
+  score = 0;
+  speed = 6 * (canvas.width/1200);
+  frames = 0;
+  obstacles = [];
+  pickups = [];
+  player.y = H - groundHeight - player.h;
+  player.vy = 0;
+  player.onGround = true;
+  player.jumps = 0;
+  player.dashTimer = 0;
+  player.dashCooldown = 0;
+  gameOver = false;
+  running = false;
+  overlayBox.style.display = 'none';
+}
+function startGame(){
+  if(!AudioCtx || AudioCtx.state === 'suspended') {
+    try { AudioCtx && AudioCtx.resume(); } catch(e){}
+  }
+  resetGame();
+  running = true;
+  gameLoop();
+}
+function restart(){
+  resetGame();
+  startGame();
+}
+
+// Simple collision
+function rectsOverlap(a,b){
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// Main loop
+function gameLoop(){
+  if(gameOver){
+    showGameOver();
+    return;
+  }
+  // update
+  frames++;
+  if(running){
+    // difficulty ramps
+    if(frames % 240 === 0) speed += 0.2;
+    // spawn obstacles
+    if(frames % Math.max(40, Math.floor(110 - Math.min(60, score/6))) === 0) {
+      spawnObstacle();
+    }
+    if(frames % 140 === 0) spawnPickup();
+
+    // update player dash cooldowns
+    if(player.dashCooldown > 0) player.dashCooldown--;
+    if(player.dashTimer > 0) player.dashTimer--;
+
+    // physics
+    if(player.dashTimer > 0) {
+      // dash moves player forward slightly and reduces gravity effect
+      player.vy += gravity * 0.12;
+      player.x += 5 * (canvas.width/1200);
+    } else {
+      player.vy += gravity;
+    }
+    player.y += player.vy;
+
+    // ground collision
+    const groundY = H - groundHeight - player.h;
+    if(player.y >= groundY){
+      player.y = groundY;
+      player.vy = 0;
+      player.onGround = true;
+      player.jumps = 0;
+    } else {
+      player.onGround = false;
+    }
+
+    // obstacles move
+    for(let i = obstacles.length-1; i >= 0; i--){
+      const o = obstacles[i];
+      o.x -= speed * (canvas.width/1200);
+      // check hit
+      if(rectsOverlap({x:player.x,y:player.y,w:player.w,h:player.h}, o)) {
+        // if dashing and obstacle is low, break through
+        if(player.dashTimer > 0 && o.type === 'low') {
+          beep(260,0.06,'sawtooth',0.08);
+          // small smash effect: remove obstacle and add score
+          obstacles.splice(i,1);
+          score += 3;
+          continue;
+        } else {
+          // hit — game over
+          gameOver = true;
+        }
+      }
+      // scored?
+      if(!o.passed && o.x + o.w < player.x){
+        o.passed = true;
+        score += 1;
+      }
+      if(o.x + o.w < -50) obstacles.splice(i,1);
+    }
+
+    // pickups
+    for(let i = pickups.length-1; i >= 0; i--){
+      const p = pickups[i];
+      p.x -= speed * (canvas.width/1200);
+      // collect?
+      const pr = p.r;
+      const px = p.x;
+      const py = p.y;
+      // simple circle-rect overlap
+      const nearestX = Math.max(player.x, Math.min(px, player.x + player.w));
+      const nearestY = Math.max(player.y, Math.min(py, player.y + player.h));
+      const dx = px - nearestX;
+      const dy = py - nearestY;
+      if(dx*dx + dy*dy < pr*pr){
+        pickups.splice(i,1);
+        score += 5;
+        beep(980,0.06,'sine',0.07);
+      } else if(p.x < -60) pickups.splice(i,1);
+    }
+
+    // incremental score while alive
+    if(frames % 6 === 0) score += 0.25;
+  }
+
+  // draw
+  drawScene();
+
+  // next frame
+  if(!gameOver) requestAnimationFrame(gameLoop);
+  else showGameOver();
+}
+
+// Draw function
+function drawScene(){
+  // clear
+  ctx.clearRect(0,0,W,H);
+
+  // sky gradient
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#001125');
+  g.addColorStop(1,'#071024');
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,W,H);
+
+  // far mountains (stylized)
+  drawMountain(W*0.15, H*0.65, 450, 180);
+  drawMountain(W*0.6, H*0.68, 600, 150);
+  drawMoon(W*0.85, H*0.22, 46);
+
+  // ground
+  ctx.fillStyle = P.ground;
+  ctx.fillRect(0, H - groundHeight, W, groundHeight);
+
+  // subtle grid on ground
+  ctx.fillStyle = 'rgba(255,255,255,0.02)';
+  for(let i=0;i<20;i++){
+    ctx.fillRect((i*80 + (frames*2 % 80)) % W, H - groundHeight + 2, 40, 2);
+  }
+
+  // pickups (coins)
+  pickups.forEach(p => {
+    ctx.beginPath();
+    ctx.fillStyle = P.coin;
+    const r = p.r;
+    ctx.arc(p.x, p.y, r, 0, Math.PI*2);
+    ctx.fill();
+    // inner shine
+    ctx.beginPath();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.arc(p.x - r*0.28, p.y - r*0.28, r*0.35, 0, Math.PI*2);
+    ctx.fill();
+  });
+
+  // obstacles
+  obstacles.forEach(o => {
+    ctx.fillStyle = P.obstacle;
+    // slight shading
+    const grad = ctx.createLinearGradient(o.x, o.y, o.x+o.w, o.y+o.h);
+    grad.addColorStop(0, '#35516a');
+    grad.addColorStop(1, '#203543');
+    ctx.fillStyle = grad;
+    ctx.fillRect(o.x, o.y, o.w, o.h);
+
+    // spikes for tall obstacles
+    if(o.type === 'tall'){
+      ctx.fillStyle = '#0b1622';
+      for(let s=0;s<3;s++){
+        const sx = o.x + s*(o.w/2);
+        ctx.beginPath();
+        ctx.moveTo(sx, o.y);
+        ctx.lineTo(sx + o.w/4, o.y - o.h*0.12);
+        ctx.lineTo(sx + o.w/2, o.y);
+        ctx.fill();
+      }
+    } else {
+      // mark low obstacle with glowing line to suggest breakable
+      ctx.fillStyle = 'rgba(255,140,140,0.06)';
+      ctx.fillRect(o.x, o.y, o.w, 4);
+    }
+  });
+
+  // player trail when dashing
+  if(player.dashTimer > 0){
+    for(let t=0;t<4;t++){
+      ctx.fillStyle = `rgba(255, 173, 192, ${0.12 - t*0.02})`;
+      ctx.fillRect(player.x - (t*8), player.y + t*5, player.w, player.h - t*10);
+    }
+  }
+
+  // player
+  ctx.fillStyle = P.demon;
+  const px = player.x, py = player.y, pw = player.w, ph = player.h;
+  // body
+  ctx.fillRect(px, py, pw, ph);
+  // eyes
+  ctx.fillStyle = '#fffb';
+  ctx.fillRect(px + pw*0.14, py + ph*0.18, pw*0.18, ph*0.12);
+  ctx.fillRect(px + pw*0.62, py + ph*0.18, pw*0.18, ph*0.12);
+  // horns
+  ctx.beginPath();
+  ctx.moveTo(px + pw*0.12, py);
+  ctx.lineTo(px + pw*0.08, py - ph*0.3);
+  ctx.lineTo(px + pw*0.2, py - ph*0.06);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(px + pw*0.88, py);
+  ctx.lineTo(px + pw*0.92, py - ph*0.3);
+  ctx.lineTo(px + pw*0.8, py - ph*0.06);
+  ctx.fill();
+
+  // score HUD
+  ctx.fillStyle = P.text;
+  ctx.font = `${Math.round(18*(canvas.width/1200))}px system-ui,Segoe UI`;
+  ctx.fillText('Score: ' + Math.floor(score), 18*(canvas.width/1200), 34*(canvas.height/520));
+
+  // dash cooldown indicator
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(18*(canvas.width/1200), 44*(canvas.height/520), 160*(canvas.width/1200), 10*(canvas.height/520));
+  const cd = Math.max(0, Math.min(1, 1 - (player.dashCooldown / 80)));
+  ctx.fillStyle = 'rgba(123,241,168,0.9)';
+  ctx.fillRect(18*(canvas.width/1200), 44*(canvas.height/520), 160*(canvas.width/1200)*cd, 10*(canvas.height/520));
+}
+
+// simple mountain
+function drawMountain(cx, baseY, width, height){
+  ctx.beginPath();
+  ctx.moveTo(cx - width, baseY);
+  ctx.lineTo(cx - width*0.2, baseY - height*1.1);
+  ctx.lineTo(cx + width*0.2, baseY - height*0.9);
+  ctx.lineTo(cx + width, baseY);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(30,45,60,0.7)';
+  ctx.fill();
+}
+
+// moon
+function drawMoon(x,y,r){
+  ctx.beginPath();
+  const gradient = ctx.createRadialGradient(x - r*0.2, y - r*0.2, r*0.1, x, y, r);
+  gradient.addColorStop(0, '#ffd76b');
+  gradient.addColorStop(1, '#ff7b7b22');
+  ctx.fillStyle = gradient;
+  ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fill();
+}
+
+// show game over UI
+function showGameOver(){
+  running = false;
+  overlayBox.style.display = 'block';
+  document.getElementById('msgTitle').textContent = 'Game Over';
+  document.getElementById('finalScore').textContent = Math.floor(score);
+  beep(160,0.18,'sine',0.06);
+}
+
+// start automatically paused overlay
+overlayBox.style.display = 'block';
+document.getElementById('msgTitle').textContent = 'Ready?';
+document.getElementById('msgText').textContent = 'Click / Tap to start';
+playBtn.textContent = 'Start';
+
+// Start with player on ground
+player.y = H - groundHeight - player.h;
+
+// auto loop to keep canvas animated while waiting
+(function idleTick(){
+  drawScene();
+  requestAnimationFrame(idleTick);
+})();
+</script>
+</body>
+</html>
